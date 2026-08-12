@@ -30,7 +30,7 @@ jobs:
           libncursesw5-dev libssl-dev python2.7-dev python3 \
           unzip wget python3-distutils python3-setuptools python3-dev \
           rsync subversion swig time xsltproc zlib1g-dev \
-          device-tree-compiler gcc-aarch64-linux-gnu bc lz4 python
+          device-tree-compiler gcc-aarch64-linux-gnu bc lz4 python-is-python3 python2
 
     - name: 3. 从零拉取光影猫 RK3568 源码 SDK
       run: |
