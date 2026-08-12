@@ -5,7 +5,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-20.04 # 严格遵守官方文档要求：Ubuntu 20.04
+    runs-on: ubuntu-22.04 # 严格遵守官方文档要求：Ubuntu 20.04
 
     steps:
     - name: 1. 释放云主机极限硬盘空间 (防止庞大的 SDK 撑爆云盘)
@@ -60,3 +60,6 @@ jobs:
         name: Photonicat-Custom-Image
         # 官方文档说明产物在这个目录
         path: rk3568-linux-sdk/rockdev/pack/*.img
+
+
+
