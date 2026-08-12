@@ -38,7 +38,7 @@ jobs:
         cd rk3568-linux-sdk
         git submodule update --init
 
-    - name: 4. 执行官方配置与【终极防翻车补丁】
+    - name: 4. 执行官方配置与【核心刺客切除术】
       run: |
         cd rk3568-linux-sdk
         ./rk3568-config-photonicat-openwrt.sh
@@ -46,37 +46,23 @@ jobs:
         # 强制注入补丁：干掉 ath11k 固件的哈希校验
         sed -i 's/4a2d09661d8ae932f93b1cdf9889197f4051bc0dfe9b757fddc6f4af566f0bb3/skip/g' openwrt/package/firmware/ath11k-firmware/Makefile || true
         
-        # 【盲肠切除术】：暴力干掉 igmpproxy 和 wpad-basic，防止编译崩溃
+        # 【盲肠切除】：彻底干掉 igmpproxy 和 wpad-basic，绝除后患
         sed -i '/CONFIG_PACKAGE_igmpproxy/d' openwrt/.config || true
         echo "# CONFIG_PACKAGE_igmpproxy is not set" >> openwrt/.config
         sed -i '/CONFIG_PACKAGE_wpad-basic/d' openwrt/.config || true
         echo "# CONFIG_PACKAGE_wpad-basic is not set" >> openwrt/.config
 
-    - name: 5. 启动核爆级云端循环编译 (强行碾压错误)
+    - name: 5. 启动官方标准编译 (回归正轨)
       run: |
         cd rk3568-linux-sdk
         export CROSS_COMPILE=aarch64-linux-gnu-
         
-        echo "=== 第一阶段：全速多线程冲刺 ==="
-        ./build.sh || true
-        
-        echo "=== 第二阶段：单线程排雷碾压模式 ==="
-        cd openwrt
-        for i in 1 2 3; do
-          if make -j1 V=s IGNORE_ERRORS=1; then
-            echo "OpenWrt 编译成功！"
-            break
-          else
-            echo "第 $i 次遇到错误，强行打上标记跳过并继续..."
-          fi
-        done
-        
-        echo "=== 第三阶段：最终打包固件 ==="
-        cd ..
-        ./build.sh || true
+        # 既然绊脚石已经清空，直接使用官方脚本全速冲刺！
+        ./build.sh
 
     - name: 6. 收集并上传最终刷机镜像包
       uses: actions/upload-artifact@v4
+      if: success() # 只有编译成功才上传，拒绝假绿勾
       with:
         name: Photonicat-Custom-Image
         path: rk3568-linux-sdk/rockdev/pack/*.img
