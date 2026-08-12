@@ -1,14 +1,18 @@
-name: Photonicat Ultimate Cloud Build
+name: Build Photonicat OpenWrt
 
 on:
-  workflow_dispatch: # 允许手动点击触发
+  workflow_dispatch: # 允许在 GitHub Actions 页面手动点击触发编译
 
 jobs:
   build:
-    runs-on: ubuntu-22.04 # 使用 22.04 资源池，排队最快
+    # 使用最新的 Ubuntu 享受极速排队和高性能，规避 20.04 的排队地狱
+    runs-on: ubuntu-latest 
 
     steps:
-    - name: 1. 终极释放磁盘空间 (强行腾出40GB空间，彻底告别爆盘)
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    - name: Free Disk Space
       uses: jlumbroso/free-disk-space@main
       with:
         tool-cache: true
@@ -16,53 +20,59 @@ jobs:
         dotnet: true
         haskell: true
         large-packages: true
-        docker-images: true
-        swap-storage: true
+        # 必须设为 false，我们需要用到 Docker
+        docker-images: false 
+        # 必须设为 false！保留 Swap 虚拟内存，防止由于高并发导致 OOM (内存溢出) 被强杀
+        swap-storage: false  
 
-    - name: 2. 安装光影猫官方指定的全部环境依赖 (已修复 Python 冲突)
-      env:
-        DEBIAN_FRONTEND: noninteractive
+    - name: Compile in Ubuntu 20.04 Docker Container
       run: |
-        sudo apt-get update
-        sudo apt-get install -y build-essential flex bison genext2fs \
-          ccache ecj fastjar file g++ gawk gettext git \
-          java-propose-classpath libelf-dev libncurses5-dev \
-          libncursesw5-dev libssl-dev python2.7-dev python3 \
-          unzip wget python3-distutils python3-setuptools python3-dev \
-          rsync subversion swig time xsltproc zlib1g-dev \
-          device-tree-compiler gcc-aarch64-linux-gnu bc lz4 python-is-python3 python2
-
-    - name: 3. 从零拉取光影猫 RK3568 源码 SDK
-      run: |
-        git clone https://github.com/photonicat/rockchip_rk3568_linux_sdk -b openwrt --single-branch rk3568-linux-sdk
-        cd rk3568-linux-sdk
-        git submodule update --init
-
-    - name: 4. 执行官方配置与【核心刺客切除术】
-      run: |
-        cd rk3568-linux-sdk
-        ./rk3568-config-photonicat-openwrt.sh
+        # 启动一个 Ubuntu 20.04 容器，并将 GitHub 的工作目录挂载到容器内的 /workspace
+        docker run --rm -v ${{ github.workspace }}:/workspace ubuntu:20.04 /bin/bash -c "
         
-        # 强制注入补丁：干掉 ath11k 固件的哈希校验
-        sed -i 's/4a2d09661d8ae932f93b1cdf9889197f4051bc0dfe9b757fddc6f4af566f0bb3/skip/g' openwrt/package/firmware/ath11k-firmware/Makefile || true
+        # 1. 更新软件源并安装光影猫官方要求的所有依赖
+        apt-get update
+        DEBIAN_FRONTEND=noninteractive apt-get install -y sudo build-essential flex bison genext2fs \
+            ccache ecj fastjar file g++ gawk gettext git \
+            java-propose-classpath libelf-dev libncurses5-dev \
+            libncursesw5-dev libssl-dev python2.7-dev python3 \
+            unzip wget python3-distutils python3-setuptools python3-dev \
+            rsync subversion swig time xsltproc zlib1g-dev \
+            device-tree-compiler gcc-aarch64-linux-gnu bc lz4 python python-is-python2
         
-        # 【盲肠切除】：彻底干掉 igmpproxy 和 wpad-basic，绝除后患
-        sed -i '/CONFIG_PACKAGE_igmpproxy/d' openwrt/.config || true
-        echo "# CONFIG_PACKAGE_igmpproxy is not set" >> openwrt/.config
-        sed -i '/CONFIG_PACKAGE_wpad-basic/d' openwrt/.config || true
-        echo "# CONFIG_PACKAGE_wpad-basic is not set" >> openwrt/.config
-
-    - name: 5. 启动官方标准编译 (回归正轨)
-      run: |
-        cd rk3568-linux-sdk
-        export CROSS_COMPILE=aarch64-linux-gnu-
+        # 2. 创建非 root 用户 (OpenWrt 编译硬性要求)
+        useradd -m -s /bin/bash builder
+        chown -R builder:builder /workspace
         
-        # 既然绊脚石已经清空，直接使用官方脚本全速冲刺！
-        ./build.sh
+        # 3. 切换到 builder 用户并执行官方编译流程
+        su - builder -c '
+          cd /workspace
+          
+          # 优化 Git 缓冲区设置，防止拉取超大仓库 (如内核) 时中断
+          git config --global http.postBuffer 1048576000
+          
+          echo \"开始克隆 SDK...\"
+          git clone https://github.com/photonicat/rockchip_rk3568_linux_sdk -b openwrt --single-branch rk3568-linux-sdk
+          cd rk3568-linux-sdk
+          
+          # 如果你在云端也遇到 GitHub 抽风拉取失败，可以取消下面这行的注释开启镜像加速
+          # git config --global url.\"https://ghfast.top/https://github.com/\".insteadOf \"https://github.com/\"
+          
+          echo \"初始化子模块...\"
+          git submodule update --init --depth 1
+          
+          echo \"加载光影猫 OpenWrt 配置...\"
+          ./rk3568-config-photonicat-openwrt.sh
+          
+          echo \"开始执行全自动编译...\"
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          ./build.sh
+        '
+        "
 
-    - name: 6. 收集并上传最终刷机镜像包
+    - name: Upload Firmware Artifacts
       uses: actions/upload-artifact@v4
-      if: success() # 只有编译成功才上传，拒绝假绿勾
       with:
-        name: Photonicat-Custom-Image
-        path: rk3568-linux-sdk/rockdev/pack/*.img
+        name: photonicat-openwrt-firmware
+        # 提取 rockdev/pack 目录下生成的最终镜像文件
+        path: ${{ github.workspace }}/rk3568-linux-sdk/rockdev/pack/*.img
