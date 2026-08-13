@@ -1,36 +1,35 @@
-name: Build Photonicat OpenWrt
+name: Build Official Photonicat SDK
 
 on:
-  workflow_dispatch: # 允许在 GitHub Actions 页面手动点击触发编译
+  workflow_dispatch:
 
 jobs:
   build:
-    # 使用最新的 Ubuntu 享受极速排队和高性能，规避 20.04 的排队地狱
-    runs-on: ubuntu-latest 
+    runs-on: ubuntu-latest # 使用最新机器排队最快
 
     steps:
+    - name: Maximize Build Space & Add Swap
+      uses: easimon/maximize-build-space@master
+      with:
+        # 核心黑科技：分配 4GB 虚拟内存防止编译内核时 OOM 猝死
+        swap-size-mb: 4096
+        # 卸载所有无用组件
+        remove-dotnet: 'true'
+        remove-android: 'true'
+        remove-haskell: 'true'
+        remove-codeql: 'true'
+        remove-docker-images: 'true'
+
     - name: Checkout Code
       uses: actions/checkout@v4
 
-    - name: Free Disk Space
-      uses: jlumbroso/free-disk-space@main
-      with:
-        tool-cache: true
-        android: true
-        dotnet: true
-        haskell: true
-        large-packages: true
-        # 必须设为 false，我们需要用到 Docker
-        docker-images: false 
-        # 必须设为 false！保留 Swap 虚拟内存，防止由于高并发导致 OOM (内存溢出) 被强杀
-        swap-storage: false  
-
-    - name: Compile in Ubuntu 20.04 Docker Container
+    - name: Compile in pure Ubuntu 20.04 Container
       run: |
-        # 启动一个 Ubuntu 20.04 容器，并将 GitHub 的工作目录挂载到容器内的 /workspace
+        # 启动 Ubuntu 20.04 容器，避开 22.04 的 OpenSSL 3.0 致命报错
         docker run --rm -v ${{ github.workspace }}:/workspace ubuntu:20.04 /bin/bash -c "
         
-        # 1. 更新软件源并安装光影猫官方要求的所有依赖
+        # 1. 替换国内镜像源加速 apt，并安装官方依赖
+        sed -i 's/archive.ubuntu.com/mirrors.aliyun.com/g' /etc/apt/sources.list
         apt-get update
         DEBIAN_FRONTEND=noninteractive apt-get install -y sudo build-essential flex bison genext2fs \
             ccache ecj fastjar file g++ gawk gettext git \
@@ -40,39 +39,45 @@ jobs:
             rsync subversion swig time xsltproc zlib1g-dev \
             device-tree-compiler gcc-aarch64-linux-gnu bc lz4 python python-is-python2
         
-        # 2. 创建非 root 用户 (OpenWrt 编译硬性要求)
+        # 2. 建立非 root 用户满足 OpenWrt 编译限制
         useradd -m -s /bin/bash builder
         chown -R builder:builder /workspace
         
-        # 3. 切换到 builder 用户并执行官方编译流程
+        # 3. 执行官方全量编译，并强制输出日志
         su - builder -c '
           cd /workspace
-          
-          # 优化 Git 缓冲区设置，防止拉取超大仓库 (如内核) 时中断
           git config --global http.postBuffer 1048576000
           
-          echo \"开始克隆 SDK...\"
-          git clone https://github.com/photonicat/rockchip_rk3568_linux_sdk -b openwrt --single-branch rk3568-linux-sdk
+          echo \"[1/4] 克隆光影猫 SDK...\"
+          # 使用 ghfast 镜像加速克隆，防止因仓库过大导致网络中断
+          git clone https://ghfast.top/https://github.com/photonicat/rockchip_rk3568_linux_sdk -b openwrt --single-branch rk3568-linux-sdk
           cd rk3568-linux-sdk
           
-          # 如果你在云端也遇到 GitHub 抽风拉取失败，可以取消下面这行的注释开启镜像加速
-          # git config --global url.\"https://ghfast.top/https://github.com/\".insteadOf \"https://github.com/\"
-          
-          echo \"初始化子模块...\"
+          echo \"[2/4] 初始化子模块...\"
+          # 同样为子模块配置加速代理
+          git config --global url.\"https://ghfast.top/https://github.com/\".insteadOf \"https://github.com/\"
           git submodule update --init --depth 1
           
-          echo \"加载光影猫 OpenWrt 配置...\"
+          echo \"[3/4] 载入设备配置...\"
           ./rk3568-config-photonicat-openwrt.sh
           
-          echo \"开始执行全自动编译...\"
+          echo \"[4/4] 启动全量编译 (这会持续1-2小时，请耐心等待)...\"
           export CROSS_COMPILE=aarch64-linux-gnu-
-          ./build.sh
+          # 将终端输出同时保存到文件，留下完整的黑匣子记录
+          ./build.sh 2>&1 | tee /workspace/full_build.log
         '
         "
 
     - name: Upload Firmware Artifacts
+      if: success()
       uses: actions/upload-artifact@v4
       with:
-        name: photonicat-openwrt-firmware
-        # 提取 rockdev/pack 目录下生成的最终镜像文件
+        name: photonicat-firmware
         path: ${{ github.workspace }}/rk3568-linux-sdk/rockdev/pack/*.img
+
+    - name: Upload Build Log (On Failure)
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-crash-log
+        path: ${{ github.workspace }}/full_build.log
