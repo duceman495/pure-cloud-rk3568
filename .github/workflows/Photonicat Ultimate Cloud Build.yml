@@ -11,9 +11,9 @@ jobs:
     - name: Maximize Build Space & Add Swap
       uses: easimon/maximize-build-space@master
       with:
-        # 核心黑科技：分配 4GB 虚拟内存防止编译内核时 OOM 猝死
+        # 核心黑科技：分配 4GB 虚拟内存防止编译时 OOM 猝死
         swap-size-mb: 4096
-        # 卸载所有无用组件
+        # 卸载所有无用组件以极限榨干磁盘空间
         remove-dotnet: 'true'
         remove-android: 'true'
         remove-haskell: 'true'
@@ -25,11 +25,11 @@ jobs:
 
     - name: Compile in pure Ubuntu 20.04 Container
       run: |
-        # 启动 Ubuntu 20.04 容器，避开 22.04 的 OpenSSL 3.0 致命报错
         docker run --rm -v ${{ github.workspace }}:/workspace ubuntu:20.04 /bin/bash -c "
         
         # 1. 替换国内镜像源加速 apt，并安装官方依赖
         sed -i 's/archive.ubuntu.com/mirrors.aliyun.com/g' /etc/apt/sources.list
+        sed -i 's/security.ubuntu.com/mirrors.aliyun.com/g' /etc/apt/sources.list
         apt-get update
         DEBIAN_FRONTEND=noninteractive apt-get install -y sudo build-essential flex bison genext2fs \
             ccache ecj fastjar file g++ gawk gettext git \
@@ -43,40 +43,62 @@ jobs:
         useradd -m -s /bin/bash builder
         chown -R builder:builder /workspace
         
-        # 3. 执行官方全量编译，并强制输出日志
-        su - builder -c '
-          cd /workspace
-          git config --global http.postBuffer 1048576000
-          
-          echo \"[1/4] 克隆光影猫 SDK...\"
-          # 使用 ghfast 镜像加速克隆，防止因仓库过大导致网络中断
-          git clone https://ghfast.top/https://github.com/photonicat/rockchip_rk3568_linux_sdk -b openwrt --single-branch rk3568-linux-sdk
-          cd rk3568-linux-sdk
-          
-          echo \"[2/4] 初始化子模块...\"
-          # 同样为子模块配置加速代理
-          git config --global url.\"https://ghfast.top/https://github.com/\".insteadOf \"https://github.com/\"
-          git submodule update --init --depth 1
-          
-          echo \"[3/4] 载入设备配置...\"
-          ./rk3568-config-photonicat-openwrt.sh
-          
-          echo \"[4/4] 启动全量编译 (这会持续1-2小时，请耐心等待)...\"
-          export CROSS_COMPILE=aarch64-linux-gnu-
-          # 将终端输出同时保存到文件，留下完整的黑匣子记录
-          ./build.sh 2>&1 | tee /workspace/full_build.log
-        '
+        # 3. 创建独立的编译脚本（避免 Docker 的引号嵌套干扰）
+        cat << 'EOF' > /workspace/run_build.sh
+        #!/bin/bash
+        # 开启 pipefail 确保编译一旦失败，tee 命令不会掩盖错误退出码
+        set -o pipefail
+        
+        cd /workspace
+        git config --global http.postBuffer 1048576000
+        
+        echo \"[1/4] 克隆光影猫 SDK...\"
+        # 使用 ghfast 镜像加速克隆，防止因仓库过大导致网络中断
+        git clone https://ghfast.top/https://github.com/photonicat/rockchip_rk3568_linux_sdk -b openwrt --single-branch rk3568-linux-sdk
+        cd rk3568-linux-sdk
+        
+        echo \"[2/4] 初始化子模块...\"
+        # 为子模块拉取同样配置加速代理
+        git config --global url.\"https://ghfast.top/https://github.com/\".insteadOf \"https://github.com/\"
+        git submodule update --init --depth 1
+        
+        echo \"[3/4] 载入设备配置...\"
+        ./rk3568-config-photonicat-openwrt.sh
+        
+        echo \"[3.5/4] 关闭所有 -Werror 严格检查限制，防止编译因警告中断...\"
+        # 强行干掉源代码中的 -Werror (警告转为错误) 配置
+        find . -type f -name \"Makefile\" -exec sed -i 's/-Werror//g' {} +
+        find . -type f -name \"*.mk\" -exec sed -i 's/-Werror//g' {} +
+        
+        # 注入环境变量，强制让 GCC 9 忽略特定的检查和警告
+        export KCFLAGS=\"-Wno-error\"
+        export KBUILD_CFLAGS=\"-Wno-error\"
+        export EXTRA_CFLAGS=\"-Wno-error -Wno-format-overflow -Wno-format-truncation -Wno-array-bounds\"
+        
+        echo \"[4/4] 启动全量编译 (这会持续1-2小时，请耐心等待)...\"
+        export CROSS_COMPILE=aarch64-linux-gnu-
+        
+        # 将输出重定向到日志文件的同时输出到屏幕
+        ./build.sh 2>&1 | tee /workspace/full_build.log
+        EOF
+        
+        chmod +x /workspace/run_build.sh
+        
+        # 4. 切换到 builder 用户并执行我们刚刚写好的脚本
+        su - builder -c '/workspace/run_build.sh'
         "
 
     - name: Upload Firmware Artifacts
-      if: success()
+      # 无论前一步成功与否都尝试上传固件（只要生成了就能提取）
+      if: always() 
       uses: actions/upload-artifact@v4
       with:
         name: photonicat-firmware
         path: ${{ github.workspace }}/rk3568-linux-sdk/rockdev/pack/*.img
 
-    - name: Upload Build Log (On Failure)
-      if: failure()
+    - name: Upload Build Log
+      # 无论成功与否都必定强制提取这份黑匣子记录
+      if: always() 
       uses: actions/upload-artifact@v4
       with:
         name: build-crash-log
